@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Messenger</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- ===================== AUTH SCREEN ===================== -->
+  <div id="auth-screen" class="screen">
+    <div class="auth-box">
+      <h1 class="logo">Messenger</h1>
+
+      <div id="login-form" class="auth-form">
+        <h2>Вход</h2>
+        <input type="email" id="login-email" placeholder="Email" autocomplete="email">
+        <input type="password" id="login-password" placeholder="Пароль" autocomplete="current-password">
+        <button id="login-btn" class="primary-btn">Войти</button>
+        <p class="switch-text">Нет аккаунта? <span id="show-register">Зарегистрироваться</span></p>
+        <p id="login-error" class="error-text"></p>
+      </div>
+
+      <div id="register-form" class="auth-form hidden">
+        <h2>Регистрация</h2>
+        <input type="text" id="register-name" placeholder="Ваше имя" autocomplete="name">
+        <input type="email" id="register-email" placeholder="Email" autocomplete="email">
+        <input type="password" id="register-password" placeholder="Пароль (мин. 6 символов)" autocomplete="new-password">
+        <button id="register-btn" class="primary-btn">Создать аккаунт</button>
+        <p class="switch-text">Уже есть аккаунт? <span id="show-login">Войти</span></p>
+        <p id="register-error" class="error-text"></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================== MAIN APP ===================== -->
+  <div id="app-screen" class="screen hidden">
+    <div class="app-layout">
+
+      <!-- Sidebar -->
+      <div class="sidebar">
+        <div class="sidebar-header">
+          <div class="my-profile" id="open-my-profile">
+            <img id="my-avatar" class="avatar" src="" alt="">
+            <span id="my-name"></span>
+          </div>
+          <div class="sidebar-actions">
+            <button id="new-chat-btn" title="Новый чат">✏️</button>
+            <button id="new-group-btn" title="Новая группа">👥</button>
+            <button id="settings-btn" title="Настройки">⚙️</button>
+            <button id="logout-btn" title="Выйти">⎋</button>
+          </div>
+        </div>
+
+        <div class="search-box">
+          <input type="text" id="search-input" placeholder="Поиск людей по имени...">
+        </div>
+        <div id="search-results" class="search-results hidden"></div>
+
+        <div id="chat-list" class="chat-list"></div>
+      </div>
+
+      <!-- Chat window -->
+      <div class="chat-window">
+        <div id="no-chat-selected" class="no-chat-selected">
+          <p>Выберите чат, чтобы начать общение</p>
+        </div>
+
+        <div id="chat-active" class="chat-active hidden">
+          <div class="chat-header">
+            <button id="back-to-list-btn" title="Назад">←</button>
+            <img id="chat-header-avatar" class="avatar" src="" alt="">
+            <div class="chat-header-info">
+              <div id="chat-header-name"></div>
+              <div id="chat-header-status"></div>
+            </div>
+            <button id="chat-info-btn" title="Информация о чате">ℹ️</button>
+          </div>
+
+          <div id="messages-container" class="messages-container"></div>
+
+          <div class="message-input-row">
+            <input type="text" id="message-input" placeholder="Напишите сообщение...">
+            <button id="send-btn">➤</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================== MODALS ===================== -->
+
+  <!-- New group modal -->
+  <div id="group-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <h2>Новая группа</h2>
+      <input type="text" id="group-name-input" placeholder="Название группы">
+      <input type="text" id="group-member-search" placeholder="Поиск участников по имени...">
+      <div id="group-member-results" class="search-results"></div>
+      <div id="group-selected-members" class="selected-members"></div>
+      <div class="modal-actions">
+        <button id="group-cancel-btn" class="secondary-btn">Отмена</button>
+        <button id="group-create-btn" class="primary-btn">Создать</button>
+      </div>
+      <p id="group-error" class="error-text"></p>
+    </div>
+  </div>
+
+  <!-- Profile modal -->
+  <div id="profile-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <h2>Мой профиль</h2>
+      <div class="profile-edit">
+        <img id="profile-avatar-preview" class="avatar large" src="" alt="">
+        <input type="text" id="profile-name-input" placeholder="Имя">
+        <input type="text" id="profile-avatar-input" placeholder="URL ссылки на аватар (необязательно)">
+      </div>
+      <div class="modal-actions">
+        <button id="profile-cancel-btn" class="secondary-btn">Закрыть</button>
+        <button id="profile-save-btn" class="primary-btn">Сохранить</button>
+      </div>
+      <p id="profile-error" class="error-text"></p>
+    </div>
+  </div>
+
+  <!-- Settings modal -->
+  <div id="settings-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <h2>Настройки</h2>
+
+      <div class="settings-row">
+        <div class="settings-row-text">
+          <div class="settings-row-title">Тёмная тема</div>
+          <div class="settings-row-desc">Переключить оформление интерфейса</div>
+        </div>
+        <label class="toggle-switch">
+          <input type="checkbox" id="theme-toggle">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+
+      <div class="settings-row">
+        <div class="settings-row-text">
+          <div class="settings-row-title">Аккаунт</div>
+          <div class="settings-row-desc" id="settings-email-display"></div>
+        </div>
+      </div>
+
+      <div class="modal-actions">
+        <button id="settings-close-btn" class="secondary-btn">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Chat/Group info modal -->
+  <div id="chatinfo-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <h2 id="chatinfo-title">Информация</h2>
+      <div id="chatinfo-body"></div>
+      <div class="modal-actions">
+        <button id="chatinfo-close-btn" class="secondary-btn">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Supabase SDK (через CDN, без сборщиков) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+
+  <script src="supabase-config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
