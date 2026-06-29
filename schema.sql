@@ -22,9 +22,10 @@ create table public.profiles (
 alter table public.profiles enable row level security;
 
 -- Любой залогиненный пользователь может читать профили (нужно для поиска людей)
-create policy "Profiles are viewable by authenticated users"
+create policy "profiles_select_authenticated"
   on public.profiles for select
-  using ( auth.uid() is not null );
+  to authenticated
+  using ( true );
 
 -- Пользователь может редактировать только свой профиль
 create policy "Users can update own profile"

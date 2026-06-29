@@ -41,16 +41,12 @@
       <!-- Sidebar -->
       <div class="sidebar">
         <div class="sidebar-header">
+          <button id="burger-btn" class="burger-btn" title="Меню">☰</button>
           <div class="my-profile" id="open-my-profile">
             <img id="my-avatar" class="avatar" src="" alt="">
             <span id="my-name"></span>
           </div>
-          <div class="sidebar-actions">
-            <button id="new-chat-btn" title="Новый чат">✏️</button>
-            <button id="new-group-btn" title="Новая группа">👥</button>
-            <button id="settings-btn" title="Настройки">⚙️</button>
-            <button id="logout-btn" title="Выйти">⎋</button>
-          </div>
+          <button id="new-chat-btn" title="Новый чат" class="quick-action">✏️</button>
         </div>
 
         <div class="search-box">
@@ -80,9 +76,95 @@
 
           <div id="messages-container" class="messages-container"></div>
 
-          <div class="message-input-row">
+          <div class="message-input-row" id="message-input-row">
             <input type="text" id="message-input" placeholder="Напишите сообщение...">
             <button id="send-btn">➤</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================== BURGER MENU (slide-in panel) ===================== -->
+  <div id="burger-overlay" class="burger-overlay hidden">
+    <div id="burger-panel" class="burger-panel">
+      <div class="burger-header">
+        <img id="burger-avatar" class="avatar" src="" alt="">
+        <div>
+          <div id="burger-name" class="burger-name"></div>
+          <div id="burger-email" class="burger-email"></div>
+        </div>
+      </div>
+      <nav class="burger-nav">
+        <button class="burger-item" id="burger-profile">👤 Мой профиль</button>
+        <button class="burger-item" id="burger-new-group">👥 Новая группа</button>
+        <button class="burger-item" id="burger-new-channel">📢 Новый канал</button>
+        <button class="burger-item" id="burger-settings">⚙️ Настройки</button>
+        <button class="burger-item hidden" id="burger-admin">🛡️ Админ-панель</button>
+        <button class="burger-item" id="burger-admin-login">🔑 Войти как админ</button>
+        <button class="burger-item burger-item-danger" id="burger-logout">⎋ Выйти</button>
+      </nav>
+    </div>
+  </div>
+
+  <!-- ===================== CONTEXT MENU (ПКМ) ===================== -->
+  <div id="context-menu" class="context-menu hidden"></div>
+
+  <!-- New channel modal -->
+  <div id="channel-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <h2>Новый канал</h2>
+      <input type="text" id="channel-name-input" placeholder="Название канала">
+      <input type="text" id="channel-desc-input" placeholder="Описание (необязательно)">
+      <p class="modal-hint">В канале писать может только владелец, остальные — читают и видят сообщения.</p>
+      <div class="modal-actions">
+        <button id="channel-cancel-btn" class="secondary-btn">Отмена</button>
+        <button id="channel-create-btn" class="primary-btn">Создать</button>
+      </div>
+      <p id="channel-error" class="error-text"></p>
+    </div>
+  </div>
+
+  <!-- Admin code entry modal -->
+  <div id="admincode-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <h2>Доступ администратора</h2>
+      <input type="password" id="admincode-input" placeholder="Код доступа">
+      <div class="modal-actions">
+        <button id="admincode-cancel-btn" class="secondary-btn">Отмена</button>
+        <button id="admincode-submit-btn" class="primary-btn">Войти</button>
+      </div>
+      <p id="admincode-error" class="error-text"></p>
+    </div>
+  </div>
+
+  <!-- Admin panel (full screen) -->
+  <div id="admin-screen" class="screen hidden">
+    <div class="admin-layout">
+      <div class="admin-header">
+        <button id="admin-back-btn" class="secondary-btn admin-back-btn">← Назад в мессенджер</button>
+        <h1>Админ-панель</h1>
+      </div>
+
+      <div class="admin-tabs">
+        <button class="admin-tab active" data-tab="stats">Статистика</button>
+        <button class="admin-tab" data-tab="users">Пользователи</button>
+        <button class="admin-tab" data-tab="chats">Чаты и модерация</button>
+      </div>
+
+      <div id="admin-tab-stats" class="admin-tab-content">
+        <div id="admin-stats-grid" class="admin-stats-grid"></div>
+      </div>
+
+      <div id="admin-tab-users" class="admin-tab-content hidden">
+        <div id="admin-users-list" class="admin-list"></div>
+      </div>
+
+      <div id="admin-tab-chats" class="admin-tab-content hidden">
+        <div class="admin-chats-layout">
+          <div id="admin-chats-list" class="admin-list admin-chats-sidebar"></div>
+          <div id="admin-chat-messages" class="admin-chat-messages">
+            <p class="empty-list-hint">Выберите чат, чтобы посмотреть сообщения</p>
           </div>
         </div>
       </div>

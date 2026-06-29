@@ -8,6 +8,8 @@ let messagesChannel = null;      // подписка realtime на сообще�
 let chatsChannel = null;         // подписка realtime на изменения чатов
 let selectedGroupMembers = {};   // { id: {name, avatar_url} }
 let profilesCache = {};          // { id: {name, avatar_url, status} }
+let isCurrentUserAdmin = false;  // флаг прав администратора
+let contextMenuTarget = null;    // данные текущей цели для ПКМ-меню
 
 // ===================================================================
 // УТИЛИТЫ
@@ -126,7 +128,8 @@ function translateAuthError(err) {
 // ===================================================================
 // AUTH: выход
 // ===================================================================
-$('logout-btn').addEventListener('click', async () => {
+$('burger-logout').addEventListener('click', async () => {
+  closeBurgerMenu();
   if (currentUser) {
     await supabaseClient.from('profiles').update({
       status: 'offline',
@@ -175,6 +178,14 @@ supabaseClient.auth.onAuthStateChange(async (event, session) => {
       status: 'online',
       last_seen: new Date().toISOString()
     }).eq('id', currentUser.id);
+
+    // Проверяем, есть ли у пользователя права администратора
+    const { data: adminRow } = await supabaseClient
+      .from('admins')
+      .select('user_id')
+      .eq('user_id', currentUser.id)
+      .maybeSingle();
+    isCurrentUserAdmin = !!adminRow;
 
     showScreen('app-screen');
     loadChats();
@@ -335,15 +346,21 @@ async function loadChats() {
   listEl.innerHTML = "";
 
   for (const chat of chats) {
-    let displayName, displayAvatar;
+    let displayName, displayAvatar, preview;
 
     if (chat.type === 'group') {
       displayName = chat.name || "Группа";
       displayAvatar = chat.avatar_url || defaultAvatar(chat.name || "G");
+      preview = chat.last_message || "Нет сообщений";
+    } else if (chat.type === 'channel') {
+      displayName = "📢 " + (chat.name || "Канал");
+      displayAvatar = chat.avatar_url || defaultAvatar(chat.name || "K");
+      preview = chat.last_message || "Нет сообщений";
     } else {
       const otherProfile = await getOtherMemberProfile(chat.id);
       displayName = otherProfile ? otherProfile.name : "Пользователь";
       displayAvatar = otherProfile ? (otherProfile.avatar_url || defaultAvatar(otherProfile.name)) : defaultAvatar("?");
+      preview = chat.last_message || "Нет сообщений";
     }
 
     const item = document.createElement('div');
@@ -352,10 +369,14 @@ async function loadChats() {
       <img class="avatar" src="${escapeHtml(displayAvatar)}" alt="">
       <div class="chat-item-info">
         <div class="chat-item-name">${escapeHtml(displayName)}</div>
-        <div class="chat-item-preview">${escapeHtml(chat.last_message || "Нет сообщений")}</div>
+        <div class="chat-item-preview">${escapeHtml(preview)}</div>
       </div>
     `;
     item.addEventListener('click', () => openChat(chat.id));
+    item.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      showChatContextMenu(e, chat);
+    });
     listEl.appendChild(item);
   }
 }
@@ -421,12 +442,21 @@ async function openChat(chatId) {
     $('chat-header-avatar').src = currentChatData.avatar_url || defaultAvatar(currentChatData.name || "G");
     $('chat-header-name').textContent = currentChatData.name || "Группа";
     $('chat-header-status').textContent = `${currentChatData.members.length} участников`;
+    $('message-input-row').classList.remove('hidden');
+  } else if (currentChatData.type === 'channel') {
+    $('chat-header-avatar').src = currentChatData.avatar_url || defaultAvatar(currentChatData.name || "K");
+    $('chat-header-name').textContent = "📢 " + (currentChatData.name || "Канал");
+    $('chat-header-status').textContent = `${currentChatData.members.length} подписчиков`;
+    // Писать в канал может только его создатель — остальные только читают
+    const isOwner = currentChatData.created_by === currentUser.id;
+    $('message-input-row').classList.toggle('hidden', !isOwner);
   } else {
     const otherUserId = currentChatData.members.find(m => m !== currentUser.id);
     const otherProfile = await getProfile(otherUserId);
     $('chat-header-avatar').src = otherProfile ? (otherProfile.avatar_url || defaultAvatar(otherProfile.name)) : defaultAvatar("?");
     $('chat-header-name').textContent = otherProfile ? otherProfile.name : "Пользователь";
     $('chat-header-status').textContent = otherProfile && otherProfile.status === 'online' ? "в сети" : "не в сети";
+    $('message-input-row').classList.remove('hidden');
   }
 
   document.querySelectorAll('.chat-list-item').forEach(el => el.classList.remove('active'));
@@ -461,18 +491,23 @@ async function renderMessage(msg) {
   const isOut = msg.sender_id === currentUser.id;
 
   let senderName = "";
-  if (currentChatData.type === 'group' && !isOut) {
+  if ((currentChatData.type === 'group' || currentChatData.type === 'channel') && !isOut) {
     const senderProfile = await getProfile(msg.sender_id);
     senderName = senderProfile ? senderProfile.name : "";
   }
 
   const bubble = document.createElement('div');
   bubble.className = 'message-bubble ' + (isOut ? 'out' : 'in');
+  bubble.dataset.messageId = msg.id;
   bubble.innerHTML = `
     ${senderName ? `<div class="message-sender">${escapeHtml(senderName)}</div>` : ""}
-    <div>${escapeHtml(msg.text)}</div>
+    <div class="message-text">${escapeHtml(msg.text)}</div>
     <div class="message-time">${formatTime(msg.created_at)}</div>
   `;
+  bubble.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    showMessageContextMenu(e, msg, isOut);
+  });
   container.appendChild(bubble);
 }
 
@@ -526,9 +561,62 @@ $('message-input').addEventListener('keydown', (e) => {
 });
 
 // ===================================================================
+// БУРГЕР-МЕНЮ
+// ===================================================================
+function openBurgerMenu() {
+  $('burger-avatar').src = currentUser.avatar_url;
+  $('burger-name').textContent = currentUser.name;
+  $('burger-email').textContent = currentUser.email;
+  $('burger-admin').classList.toggle('hidden', !isCurrentUserAdmin);
+  $('burger-admin-login').classList.toggle('hidden', isCurrentUserAdmin);
+  $('burger-overlay').classList.remove('hidden');
+}
+function closeBurgerMenu() {
+  $('burger-overlay').classList.add('hidden');
+}
+
+$('burger-btn').addEventListener('click', openBurgerMenu);
+$('burger-overlay').addEventListener('click', (e) => {
+  if (e.target === $('burger-overlay')) closeBurgerMenu();
+});
+
+$('burger-profile').addEventListener('click', () => {
+  closeBurgerMenu();
+  $('open-my-profile').click();
+});
+
+$('burger-new-group').addEventListener('click', () => {
+  closeBurgerMenu();
+  openGroupModal();
+});
+
+$('burger-new-channel').addEventListener('click', () => {
+  closeBurgerMenu();
+  openChannelModal();
+});
+
+$('burger-settings').addEventListener('click', () => {
+  closeBurgerMenu();
+  $('settings-email-display').textContent = currentUser ? currentUser.email : "";
+  $('settings-modal').classList.remove('hidden');
+});
+
+$('burger-admin').addEventListener('click', () => {
+  closeBurgerMenu();
+  openAdminPanel();
+});
+
+$('burger-admin-login').addEventListener('click', () => {
+  closeBurgerMenu();
+  $('admincode-input').value = "";
+  showError('admincode-error', "");
+  $('admincode-modal').classList.remove('hidden');
+});
+
+// ===================================================================
 // СОЗДАНИЕ ГРУППЫ
 // ===================================================================
-$('new-group-btn').addEventListener('click', () => {
+function openGroupModal() {
   selectedGroupMembers = {};
   $('group-name-input').value = "";
   $('group-member-search').value = "";
@@ -536,7 +624,7 @@ $('new-group-btn').addEventListener('click', () => {
   $('group-selected-members').innerHTML = "";
   showError('group-error', "");
   $('group-modal').classList.remove('hidden');
-});
+}
 
 $('group-cancel-btn').addEventListener('click', () => {
   $('group-modal').classList.add('hidden');
@@ -620,6 +708,92 @@ $('group-create-btn').addEventListener('click', async () => {
 });
 
 // ===================================================================
+// СОЗДАНИЕ КАНАЛА
+// ===================================================================
+function openChannelModal() {
+  $('channel-name-input').value = "";
+  $('channel-desc-input').value = "";
+  showError('channel-error', "");
+  $('channel-modal').classList.remove('hidden');
+}
+
+$('channel-cancel-btn').addEventListener('click', () => {
+  $('channel-modal').classList.add('hidden');
+});
+
+$('channel-create-btn').addEventListener('click', async () => {
+  const name = $('channel-name-input').value.trim();
+  const description = $('channel-desc-input').value.trim();
+
+  if (!name) {
+    showError('channel-error', "Введите название канала");
+    return;
+  }
+
+  const { data: newChat, error: chatErr } = await supabaseClient
+    .from('chats')
+    .insert({
+      type: 'channel',
+      name: name,
+      description: description,
+      avatar_url: defaultAvatar(name),
+      created_by: currentUser.id,
+      last_message: 'Канал создан',
+      last_message_time: new Date().toISOString()
+    })
+    .select()
+    .single();
+
+  if (chatErr) {
+    showError('channel-error', "Ошибка: " + chatErr.message);
+    return;
+  }
+
+  const { error: memberErr } = await supabaseClient
+    .from('chat_members')
+    .insert({ chat_id: newChat.id, user_id: currentUser.id });
+
+  if (memberErr) {
+    showError('channel-error', "Ошибка: " + memberErr.message);
+    return;
+  }
+
+  $('channel-modal').classList.add('hidden');
+  loadChats();
+  openChat(newChat.id);
+});
+
+// ===================================================================
+// АДМИНКА: вход по коду
+// ===================================================================
+$('admincode-cancel-btn').addEventListener('click', () => {
+  $('admincode-modal').classList.add('hidden');
+});
+
+$('admincode-submit-btn').addEventListener('click', async () => {
+  const code = $('admincode-input').value.trim();
+  if (!code) {
+    showError('admincode-error', "Введите код");
+    return;
+  }
+
+  const { data, error } = await supabaseClient.rpc('redeem_admin_code', { code });
+
+  if (error) {
+    showError('admincode-error', "Ошибка: " + error.message);
+    return;
+  }
+
+  if (data === true) {
+    isCurrentUserAdmin = true;
+    $('admincode-modal').classList.add('hidden');
+    openAdminPanel();
+  } else {
+    showError('admincode-error', "Неверный код доступа");
+  }
+});
+
+// ===================================================================
 // ПРОФИЛЬ
 // ===================================================================
 $('open-my-profile').addEventListener('click', () => {
@@ -675,10 +849,11 @@ $('chat-info-btn').addEventListener('click', async () => {
 
   $('chatinfo-body').innerHTML = "";
 
-  if (currentChatData.type === 'group') {
+  if (currentChatData.type === 'group' || currentChatData.type === 'channel') {
+    const label = currentChatData.type === 'channel' ? 'Подписчики' : 'Участники';
     $('chatinfo-title').textContent = currentChatData.name;
     const body = $('chatinfo-body');
-    body.innerHTML = `<p style="margin-bottom:12px;color:var(--text-secondary)">Участники (${currentChatData.members.length}):</p>`;
+    body.innerHTML = `<p style="margin-bottom:12px;color:var(--dusk)">${label} (${currentChatData.members.length}):</p>`;
 
     for (const userId of currentChatData.members) {
       const profile = await getProfile(userId);
@@ -686,7 +861,7 @@ $('chat-info-btn').addEventListener('click', async () => {
       row.className = 'chatinfo-member-item';
       row.innerHTML = `
         <img class="avatar" src="${escapeHtml(profile ? (profile.avatar_url || defaultAvatar(profile.name)) : defaultAvatar('?'))}" alt="">
-        <span>${escapeHtml(profile ? profile.name : 'Пользователь')}${userId === currentUser.id ? ' (вы)' : ''}</span>
+        <span>${escapeHtml(profile ? profile.name : 'Пользователь')}${userId === currentUser.id ? ' (вы)' : ''}${userId === currentChatData.created_by ? ' 👑' : ''}</span>
       `;
       body.appendChild(row);
     }
@@ -739,11 +914,296 @@ $('theme-toggle').addEventListener('change', (e) => {
   applyTheme(theme);
 });
 
-$('settings-btn').addEventListener('click', () => {
-  $('settings-email-display').textContent = currentUser ? currentUser.email : "";
-  $('settings-modal').classList.remove('hidden');
-});
-
 $('settings-close-btn').addEventListener('click', () => {
   $('settings-modal').classList.add('hidden');
 });
+
+// ===================================================================
+// КОНТЕКСТНОЕ МЕНЮ (ПКМ)
+// ===================================================================
+function showContextMenu(x, y, items) {
+  const menu = $('context-menu');
+  menu.innerHTML = "";
+
+  items.forEach(item => {
+    const row = document.createElement('div');
+    row.className = 'context-menu-item' + (item.danger ? ' danger' : '');
+    row.innerHTML = `<span>${item.icon || ''}</span><span>${escapeHtml(item.label)}</span>`;
+    row.addEventListener('click', () => {
+      hideContextMenu();
+      item.action();
+    });
+    menu.appendChild(row);
+  });
+
+  menu.classList.remove('hidden');
+
+  // Не даём меню вылезти за правый/нижний край экрана
+  const menuWidth = 200, menuHeight = items.length * 42 + 12;
+  const finalX = Math.min(x, window.innerWidth - menuWidth - 8);
+  const finalY = Math.min(y, window.innerHeight - menuHeight - 8);
+  menu.style.left = finalX + 'px';
+  menu.style.top = finalY + 'px';
+}
+
+function hideContextMenu() {
+  $('context-menu').classList.add('hidden');
+}
+
+document.addEventListener('click', (e) => {
+  if (!$('context-menu').contains(e.target)) hideContextMenu();
+});
+document.addEventListener('scroll', hideContextMenu, true);
+
+// ПКМ на сообщении: копировать всегда, удалить — если своё или ты админ канала/группы
+function showMessageContextMenu(e, msg, isOut) {
+  const items = [
+    { icon: '📋', label: 'Копировать текст', action: () => {
+      navigator.clipboard.writeText(msg.text).catch(() => {});
+    }}
+  ];
+
+  if (isOut || isCurrentUserAdmin) {
+    items.push({ icon: '🗑️', label: 'Удалить сообщение', danger: true, action: async () => {
+      const { error } = await supabaseClient.from('messages').delete().eq('id', msg.id);
+      if (!error) {
+        const el = document.querySelector(`[data-message-id="${msg.id}"]`);
+        if (el) el.remove();
+      } else {
+        alert('Не удалось удалить: ' + error.message);
+      }
+    }});
+  }
+
+  showContextMenu(e.clientX, e.clientY, items);
+}
+
+// ПКМ на чате в списке: выйти из чата / удалить (если ты владелец или админ)
+function showChatContextMenu(e, chat) {
+  const isOwner = chat.created_by === currentUser.id;
+  const items = [];
+
+  const chatLabel = chat.type === 'group' ? 'группы' : (chat.type === 'channel' ? 'канала' : 'чата');
+
+  if (!isOwner) {
+    items.push({ icon: '🚪', label: `Покинуть ${chatLabel}`, danger: true, action: async () => {
+      await supabaseClient.from('chat_members').delete()
+        .eq('chat_id', chat.id).eq('user_id', currentUser.id);
+      if (currentChatId === chat.id) {
+        currentChatId = null;
+        $('chat-active').classList.add('hidden');
+        $('no-chat-selected').classList.remove('hidden');
+      }
+      loadChats();
+    }});
+  }
+
+  if (isOwner || isCurrentUserAdmin) {
+    items.push({ icon: '🗑️', label: `Удалить ${chatLabel}`, danger: true, action: async () => {
+      await supabaseClient.from('chats').delete().eq('id', chat.id);
+      if (currentChatId === chat.id) {
+        currentChatId = null;
+        $('chat-active').classList.add('hidden');
+        $('no-chat-selected').classList.remove('hidden');
+      }
+      loadChats();
+    }});
+  }
+
+  if (items.length === 0) {
+    items.push({ icon: 'ℹ️', label: 'Нет доступных действий', action: () => {} });
+  }
+
+  showContextMenu(e.clientX, e.clientY, items);
+}
+
+// ===================================================================
+// АДМИН-ПАНЕЛЬ
+// ===================================================================
+async function openAdminPanel() {
+  showScreen('admin-screen');
+  await loadAdminStats();
+  switchAdminTab('stats');
+}
+
+$('admin-back-btn').addEventListener('click', () => {
+  showScreen('app-screen');
+});
+
+document.querySelectorAll('.admin-tab').forEach(tab => {
+  tab.addEventListener('click', () => switchAdminTab(tab.dataset.tab));
+});
+
+function switchAdminTab(tabName) {
+  document.querySelectorAll('.admin-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tabName));
+  document.querySelectorAll('.admin-tab-content').forEach(c => c.classList.add('hidden'));
+  $(`admin-tab-${tabName}`).classList.remove('hidden');
+
+  if (tabName === 'users') loadAdminUsers();
+  if (tabName === 'chats') loadAdminChats();
+}
+
+async function loadAdminStats() {
+  const grid = $('admin-stats-grid');
+  grid.innerHTML = `<div class="empty-list-hint">Загрузка...</div>`;
+
+  const { data, error } = await supabaseClient.rpc('get_admin_stats');
+
+  if (error) {
+    grid.innerHTML = `<div class="empty-list-hint">Ошибка: ${escapeHtml(error.message)}</div>`;
+    return;
+  }
+
+  const cards = [
+    { label: 'Всего пользователей', value: data.total_users },
+    { label: 'Сейчас онлайн', value: data.online_users },
+    { label: 'Всего чатов', value: data.total_chats },
+    { label: 'Групп', value: data.total_groups },
+    { label: 'Каналов', value: data.total_channels },
+    { label: 'Всего сообщений', value: data.total_messages },
+    { label: 'Сообщений сегодня', value: data.messages_today },
+  ];
+
+  grid.innerHTML = cards.map(c => `
+    <div class="admin-stat-card">
+      <div class="admin-stat-value">${c.value}</div>
+      <div class="admin-stat-label">${escapeHtml(c.label)}</div>
+    </div>
+  `).join('');
+}
+
+async function loadAdminUsers() {
+  const list = $('admin-users-list');
+  list.innerHTML = `<div class="empty-list-hint">Загрузка...</div>`;
+
+  const { data, error } = await supabaseClient
+    .from('profiles')
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    list.innerHTML = `<div class="empty-list-hint">Ошибка: ${escapeHtml(error.message)}</div>`;
+    return;
+  }
+
+  if (!data || data.length === 0) {
+    list.innerHTML = `<div class="empty-list-hint">Пользователей не найдено</div>`;
+    return;
+  }
+
+  list.innerHTML = "";
+  data.forEach(profile => {
+    const row = document.createElement('div');
+    row.className = 'admin-list-row';
+    row.innerHTML = `
+      <img class="avatar" src="${escapeHtml(profile.avatar_url || defaultAvatar(profile.name))}" alt="">
+      <div class="admin-list-row-info">
+        <div class="admin-list-row-name">${escapeHtml(profile.name)}</div>
+        <div class="admin-list-row-meta">${profile.status === 'online' ? '🟢 онлайн' : 'не в сети'}</div>
+      </div>
+      <button class="danger" data-action="delete">Удалить</button>
+    `;
+    row.querySelector('[data-action="delete"]').addEventListener('click', async () => {
+      if (profile.id === currentUser.id) {
+        alert('Нельзя удалить свой собственный аккаунт через админку');
+        return;
+      }
+      if (!confirm(`Удалить пользователя «${profile.name}»? Это действие нельзя отменить.`)) return;
+
+      // Удаляем профиль — связанные чаты/сообщения/участия удалятся каскадно
+      // настройками внешних ключей (on delete cascade) в схеме БД.
+      const { error: delErr } = await supabaseClient.from('profiles').delete().eq('id', profile.id);
+      if (delErr) {
+        alert('Не удалось удалить: ' + delErr.message);
+        return;
+      }
+      loadAdminUsers();
+      loadAdminStats();
+    });
+    list.appendChild(row);
+  });
+}
+
+async function loadAdminChats() {
+  const list = $('admin-chats-list');
+  list.innerHTML = `<div class="empty-list-hint">Загрузка...</div>`;
+  $('admin-chat-messages').innerHTML = `<p class="empty-list-hint">Выберите чат, чтобы посмотреть сообщения</p>`;
+
+  const { data, error } = await supabaseClient
+    .from('chats')
+    .select('*')
+    .order('last_message_time', { ascending: false });
+
+  if (error) {
+    list.innerHTML = `<div class="empty-list-hint">Ошибка: ${escapeHtml(error.message)}</div>`;
+    return;
+  }
+
+  if (!data || data.length === 0) {
+    list.innerHTML = `<div class="empty-list-hint">Чатов не найдено</div>`;
+    return;
+  }
+
+  list.innerHTML = "";
+  data.forEach(chat => {
+    const typeLabel = chat.type === 'group' ? '👥 Группа' : (chat.type === 'channel' ? '📢 Канал' : '💬 Личный чат');
+    const row = document.createElement('div');
+    row.className = 'admin-list-row';
+    row.innerHTML = `
+      <div class="admin-list-row-info">
+        <div class="admin-list-row-name">${escapeHtml(chat.name || typeLabel)}</div>
+        <div class="admin-list-row-meta">${typeLabel}</div>
+      </div>
+      <button class="danger" data-action="delete">Удалить</button>
+    `;
+    row.querySelector('[data-action="delete"]').addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      if (!confirm('Удалить этот чат целиком вместе со всеми сообщениями?')) return;
+      await supabaseClient.from('chats').delete().eq('id', chat.id);
+      loadAdminChats();
+      loadAdminStats();
+    });
+    row.addEventListener('click', () => loadAdminChatMessages(chat));
+    list.appendChild(row);
+  });
+}
+
+async function loadAdminChatMessages(chat) {
+  const container = $('admin-chat-messages');
+  container.innerHTML = `<div class="empty-list-hint">Загрузка сообщений...</div>`;
+
+  const { data, error } = await supabaseClient
+    .from('messages')
+    .select('*')
+    .eq('chat_id', chat.id)
+    .order('created_at', { ascending: true })
+    .limit(200);
+
+  if (error) {
+    container.innerHTML = `<div class="empty-list-hint">Ошибка: ${escapeHtml(error.message)}</div>`;
+    return;
+  }
+
+  if (!data || data.length === 0) {
+    container.innerHTML = `<div class="empty-list-hint">В этом чате пока нет сообщений</div>`;
+    return;
+  }
+
+  container.innerHTML = "";
+  for (const msg of data) {
+    const senderProfile = await getProfile(msg.sender_id);
+    const row = document.createElement('div');
+    row.className = 'admin-msg-row';
+    row.innerHTML = `
+      <span class="admin-msg-del" data-id="${msg.id}">удалить</span>
+      <b>${escapeHtml(senderProfile ? senderProfile.name : 'Пользователь')}:</b>
+      ${escapeHtml(msg.text)}
+      <div style="color:var(--dusk);font-size:11px;margin-top:2px;">${formatTime(msg.created_at)}</div>
+    `;
+    row.querySelector('.admin-msg-del').addEventListener('click', async () => {
+      await supabaseClient.from('messages').delete().eq('id', msg.id);
+      row.remove();
+    });
+    container.appendChild(row);
+  }
+}
