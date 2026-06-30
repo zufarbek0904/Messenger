@@ -6,6 +6,8 @@ let currentChatId = null;
 let currentChatData = null;      // { id, type, name, avatar_url, members: [...] }
 let messagesChannel = null;      // подписка realtime на сообщения текущего чата
 let chatsChannel = null;         // подписка realtime на изменения чатов
+let reactionsChannel = null;     // подписка realtime на реакции текущего чата
+let typingChannel = null;        // канал broadcast для индикатора "печатает"
 let selectedGroupMembers = {};   // { id: {name, avatar_url} }
 let profilesCache = {};          // { id: {name, avatar_url, status} }
 let isCurrentUserAdmin = false;  // флаг прав администратора
@@ -143,6 +145,8 @@ $('burger-logout').addEventListener('click', async () => {
 function cleanupSubscriptions() {
   if (messagesChannel) { supabaseClient.removeChannel(messagesChannel); messagesChannel = null; }
   if (chatsChannel) { supabaseClient.removeChannel(chatsChannel); chatsChannel = null; }
+  if (reactionsChannel) { supabaseClient.removeChannel(reactionsChannel); reactionsChannel = null; }
+  if (typingChannel) { supabaseClient.removeChannel(typingChannel); typingChannel = null; }
 }
 
 // ===================================================================
@@ -173,6 +177,15 @@ supabaseClient.auth.onAuthStateChange(async (event, session) => {
 
     $('my-name').textContent = currentUser.name;
     $('my-avatar').src = currentUser.avatar_url;
+
+    // Если пользователь заблокирован — предупреждаем (но не выгоняем:
+    // он сможет читать сообщения, просто не сможет их отправлять —
+    // это уже обеспечено политикой RLS is_not_banned())
+    const isBanned = profile.is_banned && (!profile.banned_until || new Date(profile.banned_until) > new Date());
+    if (isBanned) {
+      const untilText = profile.banned_until ? ` до ${new Date(profile.banned_until).toLocaleString('ru-RU')}` : ' навсегда';
+      alert(`Ваш аккаунт заблокирован администратором${untilText}.${profile.ban_reason ? '\nПричина: ' + profile.ban_reason : ''}\n\nВы можете читать сообщения, но не можете их отправлять.`);
+    }
 
     await supabaseClient.from('profiles').update({
       status: 'online',
@@ -361,6 +374,22 @@ async function loadChats() {
       displayName = otherProfile ? otherProfile.name : "Пользователь";
       displayAvatar = otherProfile ? (otherProfile.avatar_url || defaultAvatar(otherProfile.name)) : defaultAvatar("?");
       preview = chat.last_message || "Нет сообщений";
+
+      // Read receipt: показываем галочку, если последнее сообщение моё
+      // и собеседник его прочитал (last_read_at >= last_message_time)
+      const { data: lastMsg } = await supabaseClient
+        .from('messages').select('sender_id').eq('chat_id', chat.id)
+        .order('created_at', { ascending: false }).limit(1).maybeSingle();
+
+      if (lastMsg && lastMsg.sender_id === currentUser.id) {
+        const { data: otherMember } = await supabaseClient
+          .from('chat_members').select('last_read_at')
+          .eq('chat_id', chat.id).neq('user_id', currentUser.id).maybeSingle();
+
+        const isRead = otherMember && chat.last_message_time &&
+          new Date(otherMember.last_read_at) >= new Date(chat.last_message_time);
+        preview = (isRead ? '✓✓ ' : '✓ ') + preview;
+      }
     }
 
     const item = document.createElement('div');
@@ -418,6 +447,12 @@ function subscribeToChatChanges() {
 // ===================================================================
 async function openChat(chatId) {
   currentChatId = chatId;
+
+  // Сбрасываем состояние, оставшееся от предыдущего чата
+  pendingImageFile = null;
+  $('image-file-input').value = "";
+  $('image-preview-row').classList.add('hidden');
+  $('typing-indicator').classList.add('hidden');
 
   // На мобильном — переключаемся с экрана списка чатов на экран самого чата
   document.querySelector('.app-layout').classList.add('mobile-chat-open');
@@ -484,7 +519,22 @@ async function loadMessages(chatId) {
     await renderMessage(msg);
   }
   container.scrollTop = container.scrollHeight;
+
+  await loadReactionsForChat(messages.map(m => m.id));
+  markChatAsRead(chatId);
 }
+
+async function markChatAsRead(chatId) {
+  await supabaseClient.from('chat_members').update({
+    last_read_at: new Date().toISOString()
+  }).eq('chat_id', chatId).eq('user_id', currentUser.id);
+}
+
+// Кэш реакций по сообщению: { messageId: [{user_id, emoji}, ...] }
+let reactionsCache = {};
+let pendingImageFile = null; // выбранный файл картинки перед отправкой
+
+const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🔥'];
 
 async function renderMessage(msg) {
   const container = $('messages-container');
@@ -499,19 +549,123 @@ async function renderMessage(msg) {
   const bubble = document.createElement('div');
   bubble.className = 'message-bubble ' + (isOut ? 'out' : 'in');
   bubble.dataset.messageId = msg.id;
-  bubble.innerHTML = `
-    ${senderName ? `<div class="message-sender">${escapeHtml(senderName)}</div>` : ""}
-    <div class="message-text">${escapeHtml(msg.text)}</div>
-    <div class="message-time">${formatTime(msg.created_at)}</div>
-  `;
+  renderMessageContent(bubble, msg, senderName);
+
   bubble.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     showMessageContextMenu(e, msg, isOut);
   });
+  bubble.addEventListener('dblclick', () => toggleReactionPicker(bubble, msg.id));
+
   container.appendChild(bubble);
+
+  // Подгружаем реакции, если уже есть в кэше (после realtime-события)
+  if (reactionsCache[msg.id]) renderReactions(bubble, msg.id);
 }
 
-// Realtime: подписка на новые сообщения именно в открытом чате
+function renderMessageContent(bubble, msg, senderName) {
+  const editedTag = msg.edited_at ? `<span class="message-edited-tag">(ред.)</span>` : "";
+  bubble.innerHTML = `
+    ${senderName ? `<div class="message-sender">${escapeHtml(senderName)}</div>` : ""}
+    ${msg.image_url ? `<img class="message-image" src="${escapeHtml(msg.image_url)}" alt="" onclick="window.open(this.src, '_blank')">` : ""}
+    ${msg.text ? `<div class="message-text">${escapeHtml(msg.text)}</div>` : ""}
+    <div class="message-time">${formatTime(msg.created_at)}${editedTag}</div>
+    <div class="message-reactions" data-reactions-for="${msg.id}"></div>
+  `;
+}
+
+function renderReactions(bubble, messageId) {
+  const container = bubble.querySelector(`[data-reactions-for="${messageId}"]`);
+  if (!container) return;
+  const reactions = reactionsCache[messageId] || [];
+
+  // Группируем по эмодзи: { emoji: { count, mine } }
+  const grouped = {};
+  reactions.forEach(r => {
+    if (!grouped[r.emoji]) grouped[r.emoji] = { count: 0, mine: false };
+    grouped[r.emoji].count++;
+    if (r.user_id === currentUser.id) grouped[r.emoji].mine = true;
+  });
+
+  container.innerHTML = Object.entries(grouped).map(([emoji, info]) => `
+    <span class="reaction-chip${info.mine ? ' mine' : ''}" data-emoji="${emoji}">${emoji} ${info.count}</span>
+  `).join('');
+
+  container.querySelectorAll('.reaction-chip').forEach(chip => {
+    chip.addEventListener('click', () => toggleReaction(messageId, chip.dataset.emoji));
+  });
+}
+
+function toggleReactionPicker(bubble, messageId) {
+  let picker = bubble.querySelector('.reaction-picker');
+  if (picker) { picker.remove(); return; }
+
+  picker = document.createElement('div');
+  picker.className = 'reaction-picker';
+  picker.innerHTML = REACTION_EMOJIS.map(e => `<span data-emoji="${e}">${e}</span>`).join('');
+  picker.querySelectorAll('span').forEach(span => {
+    span.addEventListener('click', () => {
+      toggleReaction(messageId, span.dataset.emoji);
+      picker.remove();
+    });
+  });
+  bubble.appendChild(picker);
+}
+
+async function toggleReaction(messageId, emoji) {
+  const existing = (reactionsCache[messageId] || []).find(r => r.user_id === currentUser.id && r.emoji === emoji);
+
+  if (existing) {
+    await supabaseClient.from('message_reactions').delete()
+      .eq('message_id', messageId).eq('user_id', currentUser.id).eq('emoji', emoji);
+  } else {
+    await supabaseClient.from('message_reactions').insert({
+      message_id: messageId, user_id: currentUser.id, emoji
+    });
+  }
+  // UI обновится через realtime-подписку subscribeToReactions
+}
+
+async function loadReactionsForChat(messageIds) {
+  if (messageIds.length === 0) return;
+  const { data } = await supabaseClient
+    .from('message_reactions')
+    .select('message_id, user_id, emoji')
+    .in('message_id', messageIds);
+
+  reactionsCache = {};
+  (data || []).forEach(r => {
+    if (!reactionsCache[r.message_id]) reactionsCache[r.message_id] = [];
+    reactionsCache[r.message_id].push(r);
+  });
+
+  document.querySelectorAll('.message-bubble').forEach(bubble => {
+    renderReactions(bubble, bubble.dataset.messageId);
+  });
+}
+
+function subscribeToReactions(chatId) {
+  if (reactionsChannel) supabaseClient.removeChannel(reactionsChannel);
+
+  reactionsChannel = supabaseClient
+    .channel(`reactions-${chatId}`)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'message_reactions' }, (payload) => {
+      const msgId = (payload.new && payload.new.message_id) || (payload.old && payload.old.message_id);
+      if (!msgId) return;
+
+      // Просто перезапрашиваем реакции для этого сообщения — надёжнее, чем
+      // вручную патчить локальный кэш по insert/delete
+      supabaseClient.from('message_reactions').select('message_id, user_id, emoji').eq('message_id', msgId)
+        .then(({ data }) => {
+          reactionsCache[msgId] = data || [];
+          const bubble = document.querySelector(`[data-message-id="${msgId}"]`);
+          if (bubble) renderReactions(bubble, msgId);
+        });
+    })
+    .subscribe();
+}
+
+// Realtime: подписка на новые/изменённые сообщения именно в открытом чате
 function subscribeToMessages(chatId) {
   if (messagesChannel) supabaseClient.removeChannel(messagesChannel);
 
@@ -523,41 +677,194 @@ function subscribeToMessages(chatId) {
         await renderMessage(payload.new);
         const container = $('messages-container');
         container.scrollTop = container.scrollHeight;
+        markChatAsRead(chatId);
+      }
+    )
+    .on('postgres_changes',
+      { event: 'UPDATE', schema: 'public', table: 'messages', filter: `chat_id=eq.${chatId}` },
+      async (payload) => {
+        const bubble = document.querySelector(`[data-message-id="${payload.new.id}"]`);
+        if (bubble) {
+          const isOut = payload.new.sender_id === currentUser.id;
+          let senderName = "";
+          if ((currentChatData.type === 'group' || currentChatData.type === 'channel') && !isOut) {
+            const p = await getProfile(payload.new.sender_id);
+            senderName = p ? p.name : "";
+          }
+          renderMessageContent(bubble, payload.new, senderName);
+          if (reactionsCache[payload.new.id]) renderReactions(bubble, payload.new.id);
+        }
+      }
+    )
+    .on('postgres_changes',
+      { event: 'DELETE', schema: 'public', table: 'messages' },
+      (payload) => {
+        const bubble = document.querySelector(`[data-message-id="${payload.old.id}"]`);
+        if (bubble) bubble.remove();
       }
     )
     .subscribe();
+
+  subscribeToReactions(chatId);
+  subscribeToTyping(chatId);
 }
 
 // ===================================================================
-// ОТПРАВКА СООБЩЕНИЯ
+// ВЫБОР И ПРЕВЬЮ КАРТИНКИ ПЕРЕД ОТПРАВКОЙ
+// ===================================================================
+$('attach-image-btn').addEventListener('click', () => $('image-file-input').click());
+
+$('image-file-input').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  pendingImageFile = file;
+  $('image-preview').src = URL.createObjectURL(file);
+  $('image-preview-row').classList.remove('hidden');
+});
+
+$('image-preview-remove').addEventListener('click', () => {
+  pendingImageFile = null;
+  $('image-file-input').value = "";
+  $('image-preview-row').classList.add('hidden');
+});
+
+// ===================================================================
+// ОТПРАВКА СООБЩЕНИЯ (текст и/или картинка)
 // ===================================================================
 async function sendMessage() {
   const input = $('message-input');
   const text = input.value.trim();
-  if (!text || !currentChatId) return;
+  if (!text && !pendingImageFile) return;
+  if (!currentChatId) return;
 
   input.value = "";
+  const fileToSend = pendingImageFile;
+  pendingImageFile = null;
+  $('image-file-input').value = "";
+  $('image-preview-row').classList.add('hidden');
+
+  let imageUrl = null;
+  if (fileToSend) {
+    const filePath = `${currentUser.id}/${Date.now()}_${fileToSend.name}`;
+    const { error: uploadErr } = await supabaseClient.storage
+      .from('chat-images')
+      .upload(filePath, fileToSend);
+
+    if (uploadErr) {
+      alert("Не удалось загрузить изображение: " + uploadErr.message);
+      return;
+    }
+    const { data: urlData } = supabaseClient.storage.from('chat-images').getPublicUrl(filePath);
+    imageUrl = urlData.publicUrl;
+  }
 
   const { error: msgErr } = await supabaseClient.from('messages').insert({
     chat_id: currentChatId,
     sender_id: currentUser.id,
-    text: text
+    text: text || null,
+    image_url: imageUrl
   });
 
   if (msgErr) {
-    alert("Не удалось отправить сообщение: " + msgErr.message);
+    if (msgErr.message && msgErr.message.includes('row-level security')) {
+      alert("Вы не можете отправлять сообщения: ваш аккаунт заблокирован администратором.");
+    } else {
+      alert("Не удалось отправить сообщение: " + msgErr.message);
+    }
     return;
   }
 
   await supabaseClient.from('chats').update({
-    last_message: text,
+    last_message: text || '📷 Изображение',
     last_message_time: new Date().toISOString()
   }).eq('id', currentChatId);
+
+  stopTyping();
 }
 
 $('send-btn').addEventListener('click', sendMessage);
 $('message-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') sendMessage();
+});
+
+// ===================================================================
+// РЕДАКТИРОВАНИЕ СВОИХ СООБЩЕНИЙ
+// ===================================================================
+async function startEditMessage(msg) {
+  const bubble = document.querySelector(`[data-message-id="${msg.id}"]`);
+  if (!bubble) return;
+
+  const textDiv = bubble.querySelector('.message-text');
+  const currentText = msg.text || "";
+
+  const editBox = document.createElement('div');
+  editBox.className = 'message-edit-box';
+  editBox.innerHTML = `
+    <input type="text" class="message-edit-input" value="${escapeHtml(currentText)}">
+    <div class="message-edit-actions">
+      <span data-action="save">Сохранить</span>
+      <span data-action="cancel">Отмена</span>
+    </div>
+  `;
+
+  if (textDiv) textDiv.replaceWith(editBox); else bubble.insertBefore(editBox, bubble.querySelector('.message-time'));
+
+  const editInput = editBox.querySelector('.message-edit-input');
+  editInput.focus();
+
+  editBox.querySelector('[data-action="save"]').addEventListener('click', async () => {
+    const newText = editInput.value.trim();
+    if (!newText) return;
+    const { error } = await supabaseClient.from('messages').update({
+      text: newText, edited_at: new Date().toISOString()
+    }).eq('id', msg.id);
+    if (error) alert('Не удалось сохранить: ' + error.message);
+    // UI обновится через realtime UPDATE-подписку
+  });
+
+  editBox.querySelector('[data-action="cancel"]').addEventListener('click', async () => {
+    renderMessageContent(bubble, msg, "");
+    if (reactionsCache[msg.id]) renderReactions(bubble, msg.id);
+  });
+}
+
+// ===================================================================
+// ИНДИКАТОР "ПЕЧАТАЕТ..." (через Supabase Realtime Presence/Broadcast)
+// ===================================================================
+let typingTimeout = null;
+
+function subscribeToTyping(chatId) {
+  if (typingChannel) supabaseClient.removeChannel(typingChannel);
+
+  typingChannel = supabaseClient.channel(`typing-${chatId}`, {
+    config: { broadcast: { self: false } }
+  });
+
+  typingChannel.on('broadcast', { event: 'typing' }, async ({ payload }) => {
+    if (payload.userId === currentUser.id) return;
+    const profile = await getProfile(payload.userId);
+    $('typing-indicator').textContent = `${profile ? profile.name : 'Собеседник'} печатает...`;
+    $('typing-indicator').classList.remove('hidden');
+    clearTimeout(window._typingHideTimeout);
+    window._typingHideTimeout = setTimeout(() => $('typing-indicator').classList.add('hidden'), 3000);
+  });
+
+  typingChannel.subscribe();
+}
+
+function broadcastTyping() {
+  if (!typingChannel || !currentChatId) return;
+  typingChannel.send({ type: 'broadcast', event: 'typing', payload: { userId: currentUser.id } });
+}
+
+function stopTyping() {
+  clearTimeout(typingTimeout);
+}
+
+$('message-input').addEventListener('input', () => {
+  broadcastTyping();
+  clearTimeout(typingTimeout);
+  typingTimeout = setTimeout(stopTyping, 1500);
 });
 
 // ===================================================================
@@ -957,11 +1264,22 @@ document.addEventListener('scroll', hideContextMenu, true);
 
 // ПКМ на сообщении: копировать всегда, удалить — если своё или ты админ канала/группы
 function showMessageContextMenu(e, msg, isOut) {
-  const items = [
-    { icon: '📋', label: 'Копировать текст', action: () => {
+  const items = [];
+
+  if (msg.text) {
+    items.push({ icon: '📋', label: 'Копировать текст', action: () => {
       navigator.clipboard.writeText(msg.text).catch(() => {});
-    }}
-  ];
+    }});
+  }
+
+  items.push({ icon: '😀', label: 'Реакция', action: () => {
+    const bubble = document.querySelector(`[data-message-id="${msg.id}"]`);
+    if (bubble) toggleReactionPicker(bubble, msg.id);
+  }});
+
+  if (isOut && msg.text) {
+    items.push({ icon: '✏️', label: 'Редактировать', action: () => startEditMessage(msg) });
+  }
 
   if (isOut || isCurrentUserAdmin) {
     items.push({ icon: '🗑️', label: 'Удалить сообщение', danger: true, action: async () => {
@@ -1020,6 +1338,9 @@ function showChatContextMenu(e, chat) {
 // ===================================================================
 // АДМИН-ПАНЕЛЬ
 // ===================================================================
+let allAdminUsers = [];   // кэш для локального поиска
+let allAdminChats = [];   // кэш для локального поиска
+
 async function openAdminPanel() {
   showScreen('admin-screen');
   await loadAdminStats();
@@ -1041,6 +1362,8 @@ function switchAdminTab(tabName) {
 
   if (tabName === 'users') loadAdminUsers();
   if (tabName === 'chats') loadAdminChats();
+  if (tabName === 'charts') loadAdminCharts();
+  if (tabName === 'logs') loadAdminLogs();
 }
 
 async function loadAdminStats() {
@@ -1057,6 +1380,8 @@ async function loadAdminStats() {
   const cards = [
     { label: 'Всего пользователей', value: data.total_users },
     { label: 'Сейчас онлайн', value: data.online_users },
+    { label: 'Заблокировано', value: data.banned_users },
+    { label: 'Администраторов', value: data.total_admins },
     { label: 'Всего чатов', value: data.total_chats },
     { label: 'Групп', value: data.total_groups },
     { label: 'Каналов', value: data.total_channels },
@@ -1072,11 +1397,71 @@ async function loadAdminStats() {
   `).join('');
 }
 
+// ===================================================================
+// АДМИНКА: ГРАФИКИ АКТИВНОСТИ
+// ===================================================================
+async function loadAdminCharts() {
+  const container = $('admin-charts-container');
+  container.innerHTML = `<div class="empty-list-hint">Загрузка...</div>`;
+
+  const { data, error } = await supabaseClient.rpc('get_activity_chart');
+
+  if (error) {
+    container.innerHTML = `<div class="empty-list-hint">Ошибка: ${escapeHtml(error.message)}</div>`;
+    return;
+  }
+
+  container.innerHTML = `
+    <div class="chart-block">
+      <div class="chart-title">Регистрации за 30 дней</div>
+      <div class="chart-bars" id="chart-registrations"></div>
+    </div>
+    <div class="chart-block">
+      <div class="chart-title">Сообщения за 30 дней</div>
+      <div class="chart-bars" id="chart-messages"></div>
+    </div>
+  `;
+
+  renderChartBars('chart-registrations', data.registrations);
+  renderChartBars('chart-messages', data.messages);
+}
+
+function renderChartBars(containerId, points) {
+  const container = $(containerId);
+  if (!points || points.length === 0) {
+    container.innerHTML = `<div class="empty-list-hint">Нет данных за этот период</div>`;
+    return;
+  }
+
+  // Строим непрерывный диапазон последних 30 дней, заполняя пропуски нулями
+  const map = {};
+  points.forEach(p => { map[p.day] = p.count; });
+
+  const days = [];
+  for (let i = 29; i >= 0; i--) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    const key = d.toISOString().slice(0, 10);
+    days.push({ key, count: map[key] || 0 });
+  }
+
+  const maxCount = Math.max(...days.map(d => d.count), 1);
+
+  container.innerHTML = days.map(d => {
+    const heightPct = Math.max((d.count / maxCount) * 100, 2);
+    const dateLabel = new Date(d.key).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+    return `<div class="chart-bar" style="height:${heightPct}%" data-tooltip="${dateLabel}: ${d.count}"></div>`;
+  }).join('');
+}
+
+// ===================================================================
+// АДМИНКА: ПОЛЬЗОВАТЕЛИ (бан, роли, удаление, поиск)
+// ===================================================================
 async function loadAdminUsers() {
   const list = $('admin-users-list');
   list.innerHTML = `<div class="empty-list-hint">Загрузка...</div>`;
 
-  const { data, error } = await supabaseClient
+  const { data: profiles, error } = await supabaseClient
     .from('profiles')
     .select('*')
     .order('created_at', { ascending: false });
@@ -1086,23 +1471,72 @@ async function loadAdminUsers() {
     return;
   }
 
-  if (!data || data.length === 0) {
+  const { data: admins } = await supabaseClient.from('admins').select('user_id');
+  const adminIds = new Set((admins || []).map(a => a.user_id));
+
+  allAdminUsers = (profiles || []).map(p => ({ ...p, is_admin: adminIds.has(p.id) }));
+  renderAdminUsersList(allAdminUsers);
+}
+
+$('admin-users-search').addEventListener('input', (e) => {
+  const q = e.target.value.trim().toLowerCase();
+  const filtered = q ? allAdminUsers.filter(u => u.name.toLowerCase().includes(q)) : allAdminUsers;
+  renderAdminUsersList(filtered);
+});
+
+function renderAdminUsersList(users) {
+  const list = $('admin-users-list');
+
+  if (!users || users.length === 0) {
     list.innerHTML = `<div class="empty-list-hint">Пользователей не найдено</div>`;
     return;
   }
 
   list.innerHTML = "";
-  data.forEach(profile => {
+  users.forEach(profile => {
+    const banned = profile.is_banned && (!profile.banned_until || new Date(profile.banned_until) > new Date());
     const row = document.createElement('div');
     row.className = 'admin-list-row';
     row.innerHTML = `
       <img class="avatar" src="${escapeHtml(profile.avatar_url || defaultAvatar(profile.name))}" alt="">
       <div class="admin-list-row-info">
-        <div class="admin-list-row-name">${escapeHtml(profile.name)}</div>
+        <div class="admin-list-row-name">
+          ${escapeHtml(profile.name)}
+          ${profile.is_admin ? '<span class="badge badge-admin">админ</span>' : ''}
+          ${banned ? '<span class="badge badge-banned">блокирован</span>' : ''}
+        </div>
         <div class="admin-list-row-meta">${profile.status === 'online' ? '🟢 онлайн' : 'не в сети'}</div>
       </div>
+      <select data-action="role">
+        <option value="user" ${!profile.is_admin ? 'selected' : ''}>Пользователь</option>
+        <option value="admin" ${profile.is_admin ? 'selected' : ''}>Администратор</option>
+      </select>
+      <button data-action="ban">${banned ? 'Разблок.' : 'Блок.'}</button>
       <button class="danger" data-action="delete">Удалить</button>
     `;
+
+    row.querySelector('[data-action="role"]').addEventListener('change', async (ev) => {
+      const makeAdmin = ev.target.value === 'admin';
+      if (profile.id === currentUser.id && !makeAdmin) {
+        alert('Нельзя снять права администратора с самого себя');
+        ev.target.value = 'admin';
+        return;
+      }
+      const { error: roleErr } = await supabaseClient.rpc('set_admin_role', {
+        target_user_id: profile.id, make_admin: makeAdmin
+      });
+      if (roleErr) { alert('Ошибка: ' + roleErr.message); return; }
+      loadAdminUsers();
+    });
+
+    row.querySelector('[data-action="ban"]').addEventListener('click', () => {
+      if (banned) {
+        confirmUnban(profile);
+      } else {
+        openBanModal(profile);
+      }
+    });
+
     row.querySelector('[data-action="delete"]').addEventListener('click', async () => {
       if (profile.id === currentUser.id) {
         alert('Нельзя удалить свой собственный аккаунт через админку');
@@ -1110,20 +1544,60 @@ async function loadAdminUsers() {
       }
       if (!confirm(`Удалить пользователя «${profile.name}»? Это действие нельзя отменить.`)) return;
 
-      // Удаляем профиль — связанные чаты/сообщения/участия удалятся каскадно
-      // настройками внешних ключей (on delete cascade) в схеме БД.
-      const { error: delErr } = await supabaseClient.from('profiles').delete().eq('id', profile.id);
-      if (delErr) {
-        alert('Не удалось удалить: ' + delErr.message);
-        return;
-      }
+      const { error: delErr } = await supabaseClient.rpc('admin_delete_user', { target_user_id: profile.id });
+      if (delErr) { alert('Не удалось удалить: ' + delErr.message); return; }
       loadAdminUsers();
       loadAdminStats();
     });
+
     list.appendChild(row);
   });
 }
 
+async function confirmUnban(profile) {
+  if (!confirm(`Разблокировать пользователя «${profile.name}»?`)) return;
+  const { error } = await supabaseClient.rpc('set_user_ban', { target_user_id: profile.id, ban: false });
+  if (error) { alert('Ошибка: ' + error.message); return; }
+  loadAdminUsers();
+}
+
+let banTargetUser = null;
+
+function openBanModal(profile) {
+  banTargetUser = profile;
+  $('ban-reason-input').value = "";
+  $('ban-duration-select').value = "";
+  showError('ban-error', "");
+  $('ban-modal').classList.remove('hidden');
+}
+
+$('ban-cancel-btn').addEventListener('click', () => {
+  $('ban-modal').classList.add('hidden');
+});
+
+$('ban-confirm-btn').addEventListener('click', async () => {
+  if (!banTargetUser) return;
+  const reason = $('ban-reason-input').value.trim() || null;
+  const durationVal = $('ban-duration-select').value;
+  const hours = durationVal ? parseInt(durationVal, 10) : null;
+
+  const { error } = await supabaseClient.rpc('set_user_ban', {
+    target_user_id: banTargetUser.id, ban: true, reason, hours
+  });
+
+  if (error) {
+    showError('ban-error', 'Ошибка: ' + error.message);
+    return;
+  }
+
+  $('ban-modal').classList.add('hidden');
+  loadAdminUsers();
+  loadAdminStats();
+});
+
+// ===================================================================
+// АДМИНКА: ЧАТЫ И МОДЕРАЦИЯ (поиск, удаление через RPC с логом)
+// ===================================================================
 async function loadAdminChats() {
   const list = $('admin-chats-list');
   list.innerHTML = `<div class="empty-list-hint">Загрузка...</div>`;
@@ -1139,13 +1613,26 @@ async function loadAdminChats() {
     return;
   }
 
-  if (!data || data.length === 0) {
+  allAdminChats = data || [];
+  renderAdminChatsList(allAdminChats);
+}
+
+$('admin-chats-search').addEventListener('input', (e) => {
+  const q = e.target.value.trim().toLowerCase();
+  const filtered = q ? allAdminChats.filter(c => (c.name || '').toLowerCase().includes(q)) : allAdminChats;
+  renderAdminChatsList(filtered);
+});
+
+function renderAdminChatsList(chats) {
+  const list = $('admin-chats-list');
+
+  if (!chats || chats.length === 0) {
     list.innerHTML = `<div class="empty-list-hint">Чатов не найдено</div>`;
     return;
   }
 
   list.innerHTML = "";
-  data.forEach(chat => {
+  chats.forEach(chat => {
     const typeLabel = chat.type === 'group' ? '👥 Группа' : (chat.type === 'channel' ? '📢 Канал' : '💬 Личный чат');
     const row = document.createElement('div');
     row.className = 'admin-list-row';
@@ -1159,7 +1646,7 @@ async function loadAdminChats() {
     row.querySelector('[data-action="delete"]').addEventListener('click', async (ev) => {
       ev.stopPropagation();
       if (!confirm('Удалить этот чат целиком вместе со всеми сообщениями?')) return;
-      await supabaseClient.from('chats').delete().eq('id', chat.id);
+      await supabaseClient.rpc('admin_delete_chat', { target_chat_id: chat.id });
       loadAdminChats();
       loadAdminStats();
     });
@@ -1197,13 +1684,101 @@ async function loadAdminChatMessages(chat) {
     row.innerHTML = `
       <span class="admin-msg-del" data-id="${msg.id}">удалить</span>
       <b>${escapeHtml(senderProfile ? senderProfile.name : 'Пользователь')}:</b>
-      ${escapeHtml(msg.text)}
+      ${escapeHtml(msg.text || '📷 изображение')}
       <div style="color:var(--dusk);font-size:11px;margin-top:2px;">${formatTime(msg.created_at)}</div>
     `;
     row.querySelector('.admin-msg-del').addEventListener('click', async () => {
-      await supabaseClient.from('messages').delete().eq('id', msg.id);
+      await supabaseClient.rpc('admin_delete_message', { target_message_id: msg.id });
       row.remove();
     });
     container.appendChild(row);
+  }
+}
+
+// ===================================================================
+// АДМИНКА: РАССЫЛКА ВСЕМ
+// ===================================================================
+$('admin-broadcast-btn').addEventListener('click', () => {
+  $('broadcast-text-input').value = "";
+  showError('broadcast-error', "");
+  $('broadcast-modal').classList.remove('hidden');
+});
+
+$('broadcast-cancel-btn').addEventListener('click', () => {
+  $('broadcast-modal').classList.add('hidden');
+});
+
+$('broadcast-send-btn').addEventListener('click', async () => {
+  const text = $('broadcast-text-input').value.trim();
+  if (!text) {
+    showError('broadcast-error', "Введите текст объявления");
+    return;
+  }
+
+  const { error } = await supabaseClient.rpc('broadcast_announcement', { message_text: text });
+
+  if (error) {
+    showError('broadcast-error', "Ошибка: " + error.message);
+    return;
+  }
+
+  $('broadcast-modal').classList.add('hidden');
+  alert('Объявление отправлено всем пользователям');
+});
+
+// ===================================================================
+// АДМИНКА: ЛОГИ ДЕЙСТВИЙ
+// ===================================================================
+const ACTION_LABELS = {
+  ban_user: '🚫 Блокировка пользователя',
+  unban_user: '✅ Разблокировка пользователя',
+  grant_admin: '🛡️ Выдача прав админа',
+  revoke_admin: '⬇️ Снятие прав админа',
+  delete_user: '🗑️ Удаление пользователя',
+  delete_chat: '🗑️ Удаление чата',
+  delete_message: '🗑️ Удаление сообщения',
+  broadcast: '📣 Рассылка'
+};
+
+async function loadAdminLogs() {
+  const list = $('admin-logs-list');
+  list.innerHTML = `<div class="empty-list-hint">Загрузка...</div>`;
+
+  const { data, error } = await supabaseClient
+    .from('admin_logs')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(100);
+
+  if (error) {
+    list.innerHTML = `<div class="empty-list-hint">Ошибка: ${escapeHtml(error.message)}</div>`;
+    return;
+  }
+
+  if (!data || data.length === 0) {
+    list.innerHTML = `<div class="empty-list-hint">Логов пока нет</div>`;
+    return;
+  }
+
+  list.innerHTML = "";
+  for (const log of data) {
+    const adminProfile = await getProfile(log.admin_id);
+    let targetLabel = "";
+    if (log.target_user_id) {
+      const targetProfile = await getProfile(log.target_user_id);
+      targetLabel = ` → ${targetProfile ? targetProfile.name : 'пользователь'}`;
+    }
+
+    const row = document.createElement('div');
+    row.className = 'log-row';
+    row.innerHTML = `
+      <span class="log-time">${new Date(log.created_at).toLocaleString('ru-RU')}</span>
+      <span class="log-action">${ACTION_LABELS[log.action] || log.action}</span>${escapeHtml(targetLabel)}
+      <div style="color:var(--dusk);margin-top:2px;">
+        Админ: ${escapeHtml(adminProfile ? adminProfile.name : 'неизвестно')}
+        ${log.details ? ' · ' + escapeHtml(log.details) : ''}
+      </div>
+    `;
+    list.appendChild(row);
   }
 }

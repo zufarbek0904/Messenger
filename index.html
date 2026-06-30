@@ -70,6 +70,7 @@
             <div class="chat-header-info">
               <div id="chat-header-name"></div>
               <div id="chat-header-status"></div>
+              <div id="typing-indicator" class="typing-indicator hidden">печатает...</div>
             </div>
             <button id="chat-info-btn" title="Информация о чате">ℹ️</button>
           </div>
@@ -77,8 +78,14 @@
           <div id="messages-container" class="messages-container"></div>
 
           <div class="message-input-row" id="message-input-row">
+            <button id="attach-image-btn" title="Прикрепить изображение">📎</button>
+            <input type="file" id="image-file-input" accept="image/*" class="hidden">
             <input type="text" id="message-input" placeholder="Напишите сообщение...">
             <button id="send-btn">➤</button>
+          </div>
+          <div id="image-preview-row" class="image-preview-row hidden">
+            <img id="image-preview" src="" alt="">
+            <span id="image-preview-remove">✕ убрать</span>
           </div>
         </div>
       </div>
@@ -144,30 +151,78 @@
       <div class="admin-header">
         <button id="admin-back-btn" class="secondary-btn admin-back-btn">← Назад в мессенджер</button>
         <h1>Админ-панель</h1>
+        <button id="admin-broadcast-btn" class="primary-btn admin-broadcast-btn">📣 Рассылка всем</button>
       </div>
 
       <div class="admin-tabs">
         <button class="admin-tab active" data-tab="stats">Статистика</button>
+        <button class="admin-tab" data-tab="charts">Графики</button>
         <button class="admin-tab" data-tab="users">Пользователи</button>
         <button class="admin-tab" data-tab="chats">Чаты и модерация</button>
+        <button class="admin-tab" data-tab="logs">Логи</button>
       </div>
 
       <div id="admin-tab-stats" class="admin-tab-content">
         <div id="admin-stats-grid" class="admin-stats-grid"></div>
       </div>
 
+      <div id="admin-tab-charts" class="admin-tab-content hidden">
+        <div id="admin-charts-container"></div>
+      </div>
+
       <div id="admin-tab-users" class="admin-tab-content hidden">
+        <input type="text" id="admin-users-search" class="admin-search-input" placeholder="Поиск пользователей по имени...">
         <div id="admin-users-list" class="admin-list"></div>
       </div>
 
       <div id="admin-tab-chats" class="admin-tab-content hidden">
         <div class="admin-chats-layout">
-          <div id="admin-chats-list" class="admin-list admin-chats-sidebar"></div>
+          <div>
+            <input type="text" id="admin-chats-search" class="admin-search-input" placeholder="Поиск чатов по названию...">
+            <div id="admin-chats-list" class="admin-list admin-chats-sidebar"></div>
+          </div>
           <div id="admin-chat-messages" class="admin-chat-messages">
             <p class="empty-list-hint">Выберите чат, чтобы посмотреть сообщения</p>
           </div>
         </div>
       </div>
+
+      <div id="admin-tab-logs" class="admin-tab-content hidden">
+        <div id="admin-logs-list" class="admin-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Broadcast modal -->
+  <div id="broadcast-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <h2>Рассылка всем пользователям</h2>
+      <textarea id="broadcast-text-input" placeholder="Текст объявления..." class="modal-textarea"></textarea>
+      <p class="modal-hint">Сообщение появится в системном канале «📣 Объявления» у всех пользователей.</p>
+      <div class="modal-actions">
+        <button id="broadcast-cancel-btn" class="secondary-btn">Отмена</button>
+        <button id="broadcast-send-btn" class="primary-btn">Отправить всем</button>
+      </div>
+      <p id="broadcast-error" class="error-text"></p>
+    </div>
+  </div>
+
+  <!-- Ban modal -->
+  <div id="ban-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <h2>Заблокировать пользователя</h2>
+      <input type="text" id="ban-reason-input" placeholder="Причина блокировки (необязательно)">
+      <select id="ban-duration-select" class="modal-select">
+        <option value="">Навсегда</option>
+        <option value="1">На 1 час</option>
+        <option value="24">На 24 часа</option>
+        <option value="168">На 7 дней</option>
+      </select>
+      <div class="modal-actions">
+        <button id="ban-cancel-btn" class="secondary-btn">Отмена</button>
+        <button id="ban-confirm-btn" class="primary-btn">Заблокировать</button>
+      </div>
+      <p id="ban-error" class="error-text"></p>
     </div>
   </div>
 
